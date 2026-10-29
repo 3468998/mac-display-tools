@@ -51,7 +51,7 @@ static BOOL Fail(NSError **error, NSInteger code, NSString *message) {
     if (![VirtualDeskEngine supported]) return Fail(error, 1, @"此 macOS 不提供可用的虚拟显示接口。");
     const NSUInteger scale = hiDPI ? 2 : 1;
     if (width < 800 || height < 600 || width > 7680 / scale || height > 4320 / scale ||
-        (refresh != 60 && refresh != 120)) {
+        !isfinite(refresh) || refresh < 24 || refresh > 240) {
         return Fail(error, 2, @"所选分辨率或刷新率超出支持范围。");
     }
     BOOL created = NO;
