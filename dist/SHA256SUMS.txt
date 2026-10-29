@@ -1,0 +1,2 @@
+d7790c19a5649fb3d4fe5f9bbcf06f55e0749092990e0d2c7d49ddec75051c4f  PortableDisplayControl-v2.0-macOS-arm64.zip
+07d6c9b26ab173623bcbf6b13912ae80aba2a603eb98c9da87beb4db710e5fe0  VirtualDesk-v1.0-macOS-arm64.zip
