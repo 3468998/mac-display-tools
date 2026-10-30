@@ -8,7 +8,7 @@
 
 | 程序 | 应用包 | 用途 |
 | --- | --- | --- |
-| 便携屏控制 2.0 | [PortableDisplayControl-v2.0-macOS-arm64.zip](dist/PortableDisplayControl-v2.0-macOS-arm64.zip) | 检测并控制指定 AUO 便携屏，修复兼容性，切换刷新率和 HiDPI |
+| 便携屏控制 2.1 | [PortableDisplayControl-v2.1-macOS-arm64.zip](dist/PortableDisplayControl-v2.1-macOS-arm64.zip) | 检测并控制指定 AUO 便携屏，修复兼容性，切换刷新率、HiDPI 和亮度 |
 | 虚拟显示器 1.1 | [VirtualDesk-v1.1-macOS-arm64.zip](dist/VirtualDesk-v1.1-macOS-arm64.zip) | 创建独立的软件显示器，无需连接实体屏幕 |
 
 构建使用本地 ad-hoc 签名，尚未经过 Apple 公证。若下载后 macOS 阻止打开，可在系统设置的“隐私与安全性”中核对来源并选择“仍要打开”。
@@ -19,7 +19,10 @@
 
 - 检测连接状态、桌面尺寸、渲染像素尺寸和刷新率。
 - 切换 60 Hz / 120 Hz、HiDPI 和系统提供的桌面分辨率。
+- 软件调光亮度滑块（10%–100%），不修改 EDID，也不改变硬件背光。
+- 菜单栏快速切换刷新率、HiDPI、亮度和自动恢复。
 - 可选的用户级自动恢复，在登录后及重连时恢复配置。
+- 睡眠唤醒、重新插拔和重新打开 App 后恢复上次成功的模式与亮度。
 - 可选的登录窗口阶段恢复，需要一次系统管理员授权。
 - 所有修复使用运行时 EDID 覆盖，不写入显示器固件或 EEPROM。
 
@@ -28,6 +31,8 @@
 开启自动恢复后会把组件部署到当前用户的 `~/Library/Application Support/PortableDisplayControl`，并创建用户 LaunchAgent。登录窗口阶段恢复使用 `/Library/Application Support/PortableDisplayControl/PreLogin` 和相应的系统 LaunchDaemon；关闭开关会卸载对应任务。
 
 登录窗口恢复属于 macOS 启动后的阶段，不覆盖 FileVault 预启动解锁界面，也不启用自动登录。不同设备重启后的显示效果需要实际验证。
+
+亮度调节使用 CoreGraphics 显示传输表实现软件调光：画面变暗，但屏幕硬件背光不变。恢复 100% 时会还原 ColorSync 设置。此 AUO 屏在当前 Apple Silicon DCP 路径上未响应 DDC/CI 硬件亮度查询，因此未采用硬件背光控制。
 
 ## 虚拟显示器
 

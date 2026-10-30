@@ -75,16 +75,24 @@ private final class DisplayController: ObservableObject {
     @Published private(set) var selectedResolutionID = ""
     @Published private(set) var autoReapply = false
     @Published private(set) var preLoginSupportState = "notInstalled"
+    @Published private(set) var brightnessPercent: Double
     @Published private(set) var isBusy = false
     @Published private(set) var statusMessage = "正在检测显示器…"
     @Published private(set) var lastUpdated = Date()
 
     private let tools = BundledDisplayTools(bundle: .main)
     private var timer: Timer?
+    private var wakeObserver: NSObjectProtocol?
+    private var recoveryTask: Task<Void, Never>?
+    private var recoveryPending = false
+    private var lastRecoveryAttempt = Date.distantPast
+    private var appliedBrightness: (display: CGDirectDisplayID, percent: Double)?
     private var isUpdatingSelection = false
     private var bundledToolsAvailable = false
 
     init() {
+        let savedBrightness = UserDefaults.standard.double(forKey: "softwareBrightnessPercent")
+        brightnessPercent = savedBrightness > 0 ? min(max(savedBrightness, 10), 100) : 100
         do {
             try tools.validate()
             bundledToolsAvailable = true
@@ -93,8 +101,16 @@ private final class DisplayController: ObservableObject {
             statusMessage = "操作失败：\(error.localizedDescription)"
         }
         refresh()
+        if autoReapply && screen != nil {
+            scheduleAutomaticRecovery(delay: .seconds(1))
+        }
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.refresh() }
+        }
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.scheduleAutomaticRecovery(delay: .milliseconds(800)) }
         }
         if CommandLine.arguments.contains("--enable-prelogin") {
             Task { @MainActor [weak self] in
@@ -106,6 +122,10 @@ private final class DisplayController: ObservableObject {
 
     deinit {
         timer?.invalidate()
+        recoveryTask?.cancel()
+        if let wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+        }
     }
 
     var detected: Bool { screen != nil }
@@ -140,7 +160,12 @@ private final class DisplayController: ObservableObject {
         return "\(screen.pixelWidth) x \(screen.pixelHeight) @ \(Int(screen.refreshRate.rounded())) Hz"
     }
 
+    var brightnessSummary: String {
+        "\(Int(brightnessPercent.rounded()))% · 软件调光"
+    }
+
     func refresh() {
+        let wasDetected = screen != nil
         var ids = [CGDirectDisplayID](repeating: 0, count: 32)
         var count: UInt32 = 0
         let result = CGGetOnlineDisplayList(UInt32(ids.count), &ids, &count)
@@ -155,7 +180,7 @@ private final class DisplayController: ObservableObject {
             resolutionOptions = []
             selectedResolutionID = ""
             refreshSystemSettingsStatus()
-            statusMessage = "未检测到指定便携屏"
+            if !isBusy { statusMessage = "未检测到指定便携屏" }
             lastUpdated = Date()
             return
         }
@@ -178,10 +203,14 @@ private final class DisplayController: ObservableObject {
         selectedResolutionID = matching?.id ?? resolutionOptions.first?.id ?? ""
         isUpdatingSelection = false
         refreshSystemSettingsStatus()
+        applySoftwareBrightness()
         if !isBusy && (statusMessage == "正在检测显示器…" || statusMessage == "未检测到指定便携屏") {
             statusMessage = "显示器已连接"
         }
         lastUpdated = Date()
+        if !wasDetected && autoReapply && !isBusy {
+            scheduleAutomaticRecovery()
+        }
     }
 
     func selectRefresh(_ hz: Int) {
@@ -202,6 +231,8 @@ private final class DisplayController: ObservableObject {
                 }
             }
             return "切换失败：\(error.localizedDescription)"
+        } onSuccess: {
+            self.rememberPreferredMode(width: size.0, height: size.1, hiDPI: screen.isHiDPI)
         }
     }
 
@@ -217,6 +248,8 @@ private final class DisplayController: ObservableObject {
                 tools: self.tools
             )
             return "桌面分辨率已更新"
+        } onSuccess: {
+            self.rememberPreferredMode(width: option.width, height: option.height, hiDPI: option.hiDPI)
         }
     }
 
@@ -239,6 +272,8 @@ private final class DisplayController: ObservableObject {
                 tools: self.tools
             )
             return enabled ? "HiDPI 已开启" : "已切换到原生 1x"
+        } onSuccess: {
+            self.rememberPreferredMode(width: target.width, height: target.height, hiDPI: target.hiDPI)
         }
     }
 
@@ -262,6 +297,95 @@ private final class DisplayController: ObservableObject {
             try Self.applyProfile(hz: hz, tools: self.tools)
             try Self.setMode(hz: hz, width: width, height: height, tools: self.tools)
             return "当前设置已重新应用"
+        } onSuccess: {
+            self.applySoftwareBrightness()
+        }
+    }
+
+    func setBrightness(_ value: Double) {
+        guard !isBusy, screen != nil else { return }
+        brightnessPercent = min(max(value, 10), 100)
+        UserDefaults.standard.set(brightnessPercent, forKey: "softwareBrightnessPercent")
+        if applySoftwareBrightness() {
+            statusMessage = "亮度已调整到 \(Int(brightnessPercent.rounded()))%"
+        }
+    }
+
+    func restoreBrightness() {
+        setBrightness(100)
+    }
+
+    @discardableResult
+    private func applySoftwareBrightness() -> Bool {
+        guard let screen else { return false }
+        if brightnessPercent >= 99.5 {
+            guard appliedBrightness != nil else { return true }
+            CGDisplayRestoreColorSyncSettings()
+            appliedBrightness = nil
+            return true
+        }
+        if let applied = appliedBrightness, applied.display == screen.id,
+           abs(applied.percent - brightnessPercent) < 0.5 {
+            return true
+        }
+        let level = Float(brightnessPercent / 100)
+        let result = CGSetDisplayTransferByFormula(
+            screen.id,
+            0, level, 1,
+            0, level, 1,
+            0, level, 1
+        )
+        if result != .success && !isBusy {
+            statusMessage = "软件调光失败：\(result.rawValue)"
+        } else if result == .success {
+            appliedBrightness = (screen.id, brightnessPercent)
+        }
+        return result == .success
+    }
+
+    private func rememberPreferredMode(width: Int, height: Int, hiDPI: Bool) {
+        let defaults = UserDefaults.standard
+        defaults.set(width, forKey: "preferredWidth")
+        defaults.set(height, forKey: "preferredHeight")
+        defaults.set(hiDPI, forKey: "preferredHiDPI")
+    }
+
+    private func scheduleAutomaticRecovery(delay: Duration = .milliseconds(250)) {
+        guard autoReapply, bundledToolsAvailable, !recoveryPending else { return }
+        recoveryPending = true
+        recoveryTask?.cancel()
+        recoveryTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: delay) }
+            catch { return }
+            guard let self, !Task.isCancelled else { return }
+            while self.isBusy {
+                do { try await Task.sleep(for: .milliseconds(150)) }
+                catch { return }
+            }
+            self.recoverSavedSettings()
+        }
+    }
+
+    private func recoverSavedSettings() {
+        defer { recoveryPending = false }
+        guard let screen else { return }
+        guard Date().timeIntervalSince(lastRecoveryAttempt) > 8 else { return }
+        lastRecoveryAttempt = Date()
+        let defaults = UserDefaults.standard
+        let hz = defaults.integer(forKey: "selectedRefreshRate") == 60 ? 60 : 120
+        let width = defaults.integer(forKey: "preferredWidth")
+        let height = defaults.integer(forKey: "preferredHeight")
+        let targetWidth = width >= 800 ? width : screen.logicalWidth
+        let targetHeight = height >= 600 ? height : screen.logicalHeight
+        let preferredHiDPI = defaults.object(forKey: "preferredHiDPI") as? Bool ?? screen.isHiDPI
+
+        perform("正在自动恢复便携屏配置…") {
+            try Self.applyProfile(hz: hz, tools: self.tools)
+            try Self.setMode(hz: hz, width: targetWidth, height: targetHeight, tools: self.tools)
+            return "便携屏配置已自动恢复"
+        } onSuccess: {
+            self.rememberPreferredMode(width: targetWidth, height: targetHeight, hiDPI: preferredHiDPI)
+            self.applySoftwareBrightness()
         }
     }
 
@@ -270,6 +394,12 @@ private final class DisplayController: ObservableObject {
         perform(enabled ? "正在开启重连自动恢复…" : "正在关闭重连自动恢复…") {
             try Self.setLaunchAgent(enabled, tools: self.tools)
             return enabled ? "重连自动恢复已开启" : "重连自动恢复已关闭"
+        } onSuccess: {
+            if enabled { self.scheduleAutomaticRecovery() }
+            else {
+                self.recoveryTask?.cancel()
+                self.recoveryPending = false
+            }
         }
     }
 
@@ -308,12 +438,14 @@ private final class DisplayController: ObservableObject {
     private func perform(
         _ startingMessage: String,
         operation: () throws -> String,
-        onFailure: ((Error) -> String)? = nil
+        onFailure: ((Error) -> String)? = nil,
+        onSuccess: (() -> Void)? = nil
     ) {
         isBusy = true
         statusMessage = startingMessage
         do {
             statusMessage = try operation()
+            onSuccess?()
         } catch {
             statusMessage = onFailure?(error) ?? "操作失败：\(error.localizedDescription)"
         }
@@ -432,12 +564,70 @@ struct PortableDisplayControlApp: App {
     @StateObject private var controller = DisplayController()
 
     var body: some Scene {
-        WindowGroup {
+        Window("便携屏控制", id: "portable-control") {
             ControlView()
                 .environmentObject(controller)
                 .frame(minWidth: 520, idealWidth: 580, minHeight: 620, idealHeight: 690)
         }
         .windowResizability(.contentSize)
+
+        MenuBarExtra("便携屏控制", systemImage: "display.2") {
+            PortableDisplayMenu()
+                .environmentObject(controller)
+        }
+    }
+}
+
+private struct PortableDisplayMenu: View {
+    @EnvironmentObject private var controller: DisplayController
+    @Environment(\.openWindow) private var openWindow
+
+    private var brightnessBinding: Binding<Double> {
+        Binding(
+            get: { controller.brightnessPercent },
+            set: { controller.setBrightness($0) }
+        )
+    }
+
+    var body: some View {
+        Text(controller.detected ? controller.outputSummary : "便携屏未连接")
+        Button("打开控制面板", systemImage: "slider.horizontal.3") {
+            openWindow(id: "portable-control")
+            NSApp.activate(ignoringOtherApps: true)
+        }
+        Divider()
+        if controller.detected {
+            Menu("刷新率") {
+                Button("60 Hz") { controller.selectRefresh(60) }
+                    .disabled(controller.refreshChoice == 60 || controller.isBusy)
+                Button("120 Hz") { controller.selectRefresh(120) }
+                    .disabled(controller.refreshChoice == 120 || controller.isBusy)
+            }
+            Toggle("HiDPI", isOn: Binding(
+                get: { controller.hiDPIEnabled },
+                set: { controller.toggleHiDPI($0) }
+            ))
+            VStack(alignment: .leading, spacing: 4) {
+                Text("亮度 \(Int(controller.brightnessPercent.rounded()))%")
+                Slider(value: brightnessBinding, in: 10...100, step: 1)
+                    .disabled(controller.isBusy)
+            }
+            Button("恢复亮度 100%", systemImage: "sun.max") {
+                controller.restoreBrightness()
+            }
+            .disabled(controller.isBusy || controller.brightnessPercent >= 100)
+            Toggle("断开重连后自动恢复", isOn: Binding(
+                get: { controller.autoReapply },
+                set: { controller.setAutomaticRepair($0) }
+            ))
+            .disabled(controller.isBusy)
+        } else {
+            Text("等待 AUO 便携屏连接")
+                .foregroundStyle(.secondary)
+        }
+        Divider()
+        Button("退出便携屏控制") { NSApp.terminate(nil) }
+            .keyboardShortcut("q")
     }
 }
 
@@ -479,6 +669,13 @@ private struct ControlView: View {
         )
     }
 
+    private var brightnessBinding: Binding<Double> {
+        Binding(
+            get: { controller.brightnessPercent },
+            set: { controller.setBrightness($0) }
+        )
+    }
+
     private var visibleResolutionOptions: [ResolutionOption] {
         controller.resolutionOptions.filter { controller.hiDPIEnabled ? $0.hiDPI : !$0.hiDPI }
     }
@@ -513,6 +710,31 @@ private struct ControlView: View {
                         }
                     }
                     .disabled(!controller.detected || controller.isBusy || !controller.hiDPIEnabled)
+                }
+
+                Section("亮度") {
+                    HStack(spacing: 10) {
+                        Image(systemName: "sun.min")
+                            .foregroundStyle(.secondary)
+                        Slider(value: brightnessBinding, in: 10...100, step: 1)
+                        Image(systemName: "sun.max")
+                            .foregroundStyle(.secondary)
+                        Text("\(Int(controller.brightnessPercent.rounded()))%")
+                            .monospacedDigit()
+                            .frame(width: 42, alignment: .trailing)
+                    }
+                    .disabled(!controller.detected || controller.isBusy)
+                    HStack {
+                        Text("软件调光，不改变屏幕硬件背光")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Button("恢复 100%") {
+                            controller.restoreBrightness()
+                        }
+                        .buttonStyle(.link)
+                        .disabled(!controller.detected || controller.isBusy || controller.brightnessPercent >= 100)
+                    }
                 }
 
                 Section("连接恢复") {
