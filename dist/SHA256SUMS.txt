@@ -1,4 +1,4 @@
 d7790c19a5649fb3d4fe5f9bbcf06f55e0749092990e0d2c7d49ddec75051c4f  PortableDisplayControl-v2.0-macOS-arm64.zip
-662918348cfb3f8375fd22471e933f6d97ce43533439ac37f52597f41c5829c1  PortableDisplayControl-v2.1-macOS-arm64.zip
+cc73068094bcf3daf4f3532756364b609a6acc145eb4afa97337c582c58e3c14  PortableDisplayControl-v2.1-macOS-arm64.zip
 07d6c9b26ab173623bcbf6b13912ae80aba2a603eb98c9da87beb4db710e5fe0  VirtualDesk-v1.0-macOS-arm64.zip
 86249e6d203fc4144dfe0d7dd7d5dfa535243ac5ce530f396b29699c020816c5  VirtualDesk-v1.1-macOS-arm64.zip

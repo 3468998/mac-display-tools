@@ -575,6 +575,7 @@ struct PortableDisplayControlApp: App {
             PortableDisplayMenu()
                 .environmentObject(controller)
         }
+        .menuBarExtraStyle(.window)
     }
 }
 
@@ -589,45 +590,138 @@ private struct PortableDisplayMenu: View {
         )
     }
 
+    private var refreshBinding: Binding<Int> {
+        Binding(
+            get: { controller.refreshChoice },
+            set: { controller.selectRefresh($0) }
+        )
+    }
+
+    private var hiDPIBinding: Binding<Bool> {
+        Binding(
+            get: { controller.hiDPIEnabled },
+            set: { controller.toggleHiDPI($0) }
+        )
+    }
+
+    private var resolutionBinding: Binding<String> {
+        Binding(
+            get: { controller.selectedResolutionID },
+            set: { controller.selectResolution($0) }
+        )
+    }
+
+    private var visibleResolutionOptions: [ResolutionOption] {
+        controller.resolutionOptions.filter {
+            controller.hiDPIEnabled ? $0.hiDPI : !$0.hiDPI
+        }
+    }
+
     var body: some View {
-        Text(controller.detected ? controller.outputSummary : "便携屏未连接")
-        Button("打开控制面板", systemImage: "slider.horizontal.3") {
-            openWindow(id: "portable-control")
-            NSApp.activate(ignoringOtherApps: true)
-        }
-        Divider()
-        if controller.detected {
-            Menu("刷新率") {
-                Button("60 Hz") { controller.selectRefresh(60) }
-                    .disabled(controller.refreshChoice == 60 || controller.isBusy)
-                Button("120 Hz") { controller.selectRefresh(120) }
-                    .disabled(controller.refreshChoice == 120 || controller.isBusy)
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "display.2")
+                    .foregroundStyle(Color.accentColor)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("便携屏控制")
+                        .font(.headline)
+                    Text(controller.detected ? controller.outputSummary : "便携屏未连接")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Spacer()
+                Circle()
+                    .fill(controller.detected ? Color.green : Color.secondary)
+                    .frame(width: 8, height: 8)
             }
-            Toggle("HiDPI", isOn: Binding(
-                get: { controller.hiDPIEnabled },
-                set: { controller.toggleHiDPI($0) }
-            ))
-            VStack(alignment: .leading, spacing: 4) {
-                Text("亮度 \(Int(controller.brightnessPercent.rounded()))%")
-                Slider(value: brightnessBinding, in: 10...100, step: 1)
+
+            if controller.detected {
+                Divider()
+
+                Picker("刷新率", selection: refreshBinding) {
+                    Text("60 Hz").tag(60)
+                    Text("120 Hz").tag(120)
+                }
+                .pickerStyle(.segmented)
+                .disabled(controller.isBusy)
+
+                HStack(spacing: 10) {
+                    Label("分辨率", systemImage: "rectangle.3.group")
+                    Spacer()
+                    Picker("分辨率", selection: resolutionBinding) {
+                        ForEach(visibleResolutionOptions) { option in
+                            Text(option.label).tag(option.id)
+                        }
+                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .frame(maxWidth: 190, alignment: .trailing)
+                    .disabled(controller.isBusy || visibleResolutionOptions.isEmpty)
+                }
+
+                Toggle("HiDPI", isOn: hiDPIBinding)
+                    .toggleStyle(.switch)
                     .disabled(controller.isBusy)
+
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack {
+                        Label("亮度", systemImage: "sun.max")
+                        Spacer()
+                        Text("\(Int(controller.brightnessPercent.rounded()))%")
+                            .monospacedDigit()
+                            .foregroundStyle(.secondary)
+                    }
+                    HStack(spacing: 8) {
+                        Image(systemName: "sun.min")
+                            .foregroundStyle(.secondary)
+                        Slider(value: brightnessBinding, in: 10...100, step: 1)
+                            .disabled(controller.isBusy)
+                        Image(systemName: "sun.max")
+                            .foregroundStyle(.secondary)
+                    }
+                }
+
+                HStack {
+                    Button("恢复 100%", systemImage: "arrow.counterclockwise") {
+                        controller.restoreBrightness()
+                    }
+                    .buttonStyle(.borderless)
+                    .disabled(controller.isBusy || controller.brightnessPercent >= 100)
+                    Spacer()
+                    Toggle("自动恢复", isOn: Binding(
+                        get: { controller.autoReapply },
+                        set: { controller.setAutomaticRepair($0) }
+                    ))
+                    .toggleStyle(.checkbox)
+                    .disabled(controller.isBusy)
+                }
+
+                if controller.statusIsFailure {
+                    Text(controller.statusMessage)
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            } else {
+                Text("等待 AUO 便携屏连接")
+                    .foregroundStyle(.secondary)
             }
-            Button("恢复亮度 100%", systemImage: "sun.max") {
-                controller.restoreBrightness()
+
+            Divider()
+            HStack {
+                Button("打开控制面板", systemImage: "slider.horizontal.3") {
+                    openWindow(id: "portable-control")
+                    NSApp.activate(ignoringOtherApps: true)
+                }
+                .buttonStyle(.borderless)
+                Spacer()
+                Button("退出", systemImage: "power") { NSApp.terminate(nil) }
+                    .buttonStyle(.borderless)
+                    .help("退出便携屏控制")
             }
-            .disabled(controller.isBusy || controller.brightnessPercent >= 100)
-            Toggle("断开重连后自动恢复", isOn: Binding(
-                get: { controller.autoReapply },
-                set: { controller.setAutomaticRepair($0) }
-            ))
-            .disabled(controller.isBusy)
-        } else {
-            Text("等待 AUO 便携屏连接")
-                .foregroundStyle(.secondary)
         }
-        Divider()
-        Button("退出便携屏控制") { NSApp.terminate(nil) }
-            .keyboardShortcut("q")
+        .padding(14)
+        .frame(width: 330)
     }
 }
 
